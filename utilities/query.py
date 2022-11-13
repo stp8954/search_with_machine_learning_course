@@ -12,7 +12,10 @@ import pandas as pd
 import fileinput
 import logging
 import sys
-
+import fasttext
+import nltk
+import re
+stemmer = nltk.stem.PorterStemmer()
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -189,17 +192,42 @@ def create_query(user_query, click_prior_query, filters, sort="_score", sortDir=
     return query_obj
 
 
-def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc", use_synonyms=False):
+def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc", use_synonyms=False, category_list=None):
     #### W3: classify the query
     #### W3: create filters and boosts
     # Note: you may also want to modify the `create_query` method above
-    query_obj = create_query(user_query, click_prior_query=None, filters=None, sort=sort, sortDir=sortDir, source=["name", "shortDescription"], use_synonyms=use_synonyms)
+    if(category_list):
+        filters = {
+            "terms": {
+                "categoryPathIds": category_list
+            }
+        }
+    else:
+        filters=None
+
+    query_obj = create_query(user_query, click_prior_query=None, filters=filters, sort=sort, sortDir=sortDir, source=["name", "shortDescription"], use_synonyms=use_synonyms)
     logging.info(query_obj)
     response = client.search(query_obj, index=index)
     if response and response['hits']['hits'] and len(response['hits']['hits']) > 0:
         hits = response['hits']['hits']
         print(json.dumps(response, indent=2))
 
+
+def replace_trim_stem(query):
+    query = re.sub('[^a-zA-Z]+', ' ', query.lower()).strip()
+    return ' '.join([stemmer.stem(word) for word in query.split()])
+
+def get_top_pred_categories(model_preds, threshold=0.5):
+    result_cats = []
+    score = 0.0
+    for (label, prob) in zip(model_preds[0], model_preds[1]):
+        result_cats.append(label.replace('__label__', ''))
+        score += prob
+
+        if(score >=0.5):
+            break
+
+    return result_cats
 
 if __name__ == "__main__":
     host = 'localhost'
@@ -244,6 +272,8 @@ if __name__ == "__main__":
         ssl_show_warn=False,
 
     )
+    model = fasttext.load_model('/workspace/datasets/fasttext/query_classifier.bin')
+    threshold = 0.5
     index_name = args.index
     query_prompt = "\nEnter your query (type 'Exit' to exit or hit ctrl-c):"
     print(query_prompt)
@@ -251,7 +281,12 @@ if __name__ == "__main__":
         query = line.rstrip()
         if query == "Exit":
             break
-        search(client=opensearch, user_query=query, index=index_name, use_synonyms=use_synonyms)
+
+        pred_cat = model.predict(replace_trim_stem(query), k=10)
+        category_list = get_top_pred_categories(pred_cat, threshold)
+
+        print("Predicted Category:{} for Query:{}".format(pred_cat, query))
+        search(client=opensearch, user_query=query, index=index_name, use_synonyms=use_synonyms, category_list=category_list)
 
         print(query_prompt)
 
